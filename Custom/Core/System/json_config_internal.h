@@ -102,6 +102,7 @@
  #define NVS_KEY_IMAGE_FAST_SKIP_FRAMES  "img_fast_skip"
  #define NVS_KEY_IMAGE_FAST_RESOLUTION   "img_fast_res"
  #define NVS_KEY_IMAGE_FAST_JPEG_QUALITY "img_fast_jq"
+ #define NVS_KEY_AE_LAST_STATE           "ae_state"   /* camera_ae_state_record_t */
  #define NVS_KEY_CAPTURE_DISABLE_COMM    "capture_un_comm"
  #define NVS_KEY_CAPTURE_STORAGE_AI      "capture_stor_ai"
  #define NVS_KEY_CAPTURE_QUICK_MODE      "capture_qmode"

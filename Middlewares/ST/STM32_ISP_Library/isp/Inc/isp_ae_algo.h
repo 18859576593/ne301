@@ -28,6 +28,9 @@
 /* Exported functions ------------------------------------------------------- */
 void isp_ae_init(ISP_HandleTypeDef *hIsp);
 void isp_ae_get_new_exposure(uint32_t lux, uint32_t averageL, uint32_t *pExposure, uint32_t *pGain, uint32_t curExposure, uint32_t curGain);
+/* Relax the black-frame creep step for the next N AE iterations (quick
+ * snapshot fast warmup). 0 restores the production behavior. */
+void isp_ae_request_fast_warmup(uint32_t iterations);
 
 /* Exported variables --------------------------------------------------------*/
 

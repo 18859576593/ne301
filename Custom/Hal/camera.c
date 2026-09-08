@@ -23,6 +23,34 @@
 static int pipe_buffer_acquire(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_param, camera_dq_t *dq);
 static int pipe_buffer_release(pipe_buffer_t *pipe_buffer, pipe_params_t *pipe_param, camera_dq_t *dq);
 
+/* AE restart state handed to the ISP middleware: the AE loop writes its latest
+ * convergent exposure/gain here on every update, and AEC init resumes from it
+ * on camera restart (same session, or after wake when re-seeded from NVS). */
+static ISP_RestartStateTypeDef s_ae_restart_state = {0};
+
+void camera_ae_get_last(uint32_t *exposure_us, uint32_t *gain_mdb)
+{
+    if (exposure_us) *exposure_us = s_ae_restart_state.sensorExposure;
+    if (gain_mdb)    *gain_mdb    = s_ae_restart_state.sensorGain;
+}
+
+int camera_ae_set_last(uint32_t exposure_us, uint32_t gain_mdb)
+{
+    if (exposure_us < EXPOSURE_MIN || exposure_us > EXPOSURE_MAX ||
+        gain_mdb < GAIN_MIN || gain_mdb > GAIN_MAX) {
+        return AICAM_ERROR_INVALID_PARAM;
+    }
+    s_ae_restart_state.sensorExposure = exposure_us;
+    s_ae_restart_state.sensorGain = gain_mdb;
+    s_ae_restart_state.sensorConfigured = 1;
+    return AICAM_OK;
+}
+
+aicam_bool_t camera_ae_last_valid(void)
+{
+    return s_ae_restart_state.sensorConfigured ? AICAM_TRUE : AICAM_FALSE;
+}
+
 static camera_t g_camera = {0};
 const osThreadAttr_t cameraTask_attributes = {
     .name = "cameraTask",
@@ -1116,6 +1144,10 @@ static int camera_start(void *priv)
         osMutexRelease(camera->mtx_id);
         return AICAM_OK;
     }
+
+    /* Hook the AE restart state before the ISP middleware starts: AEC init
+     * resumes from s_ae_restart_state instead of the black frame. */
+    (void)CMW_CAMERA_EnableRestartState(&s_ae_restart_state);
 
 #ifndef ISP_MW_TUNING_TOOL_SUPPORT
     // Set ISP initialization parameters before starting camera

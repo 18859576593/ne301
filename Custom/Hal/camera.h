@@ -215,4 +215,27 @@ ISP_HandleTypeDef* camera_get_isp_handle(void);
  */
 void camera_fill_isp_iq_scene(cam_iq_scene_t scene, ISP_IQParamTypeDef *out_iq);
 
+/**
+ * @brief AE restart-state persistence (fast wake capture).
+ *
+ * The ISP middleware writes its latest convergent exposure/gain into this
+ * module on every AE update. The system service persists the record to NVS
+ * before sleep; the quick snapshot path restores it after wake so AEC starts
+ * from the last convergent point instead of the black frame.
+ */
+#define CAMERA_AE_STATE_MAGIC   0x41453737U  /* "AE77" */
+
+typedef struct {
+    uint32_t magic;        /* CAMERA_AE_STATE_MAGIC */
+    uint32_t exposure_us;  /* last convergent sensor exposure (us) */
+    uint32_t gain_mdb;     /* last convergent sensor gain (mdB) */
+} camera_ae_state_record_t;
+
+/** Read the latest AE values written by the ISP middleware. */
+void camera_ae_get_last(uint32_t *exposure_us, uint32_t *gain_mdb);
+/** Seed the AE restart state before camera start. Returns 0 on success. */
+int camera_ae_set_last(uint32_t exposure_us, uint32_t gain_mdb);
+/** AICAM_TRUE once the AE loop has produced (or been seeded with) values. */
+aicam_bool_t camera_ae_last_valid(void);
+
 #endif

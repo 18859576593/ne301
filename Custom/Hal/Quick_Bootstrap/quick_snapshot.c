@@ -16,9 +16,26 @@
 #include "common_utils.h"
 #include "pwr.h"
 #include "sd_file.h"
+#include "storage.h"
+#include "json_config_internal.h"
+#include "isp_ae_algo.h"
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
+
+/* AE stable gate (fast wake capture): instead of relying only on the fixed
+ * startup skip-frame count, wait until the AE loop's exposure/gain hold steady
+ * before grabbing the frame. Bounded by QS_AE_STABLE_MAX_MS so dark scenes
+ * (slow convergence) still fall through to the legacy skip-frame behavior. */
+#ifndef QS_AE_STABLE_GATE
+#define QS_AE_STABLE_GATE           1
+#endif
+#define QS_AE_STABLE_POLL_MS        10
+#define QS_AE_STABLE_HOLD_MS        35   /* steady for ~1 frame @30fps */
+#define QS_AE_STABLE_MAX_MS         400  /* bounded fallback (~12 frames) */
+/* Relax the AE black-frame creep for the first iterations after start so the
+ * no-persisted-state path converges faster too (isp_ae_algo.c). */
+#define QS_AE_FAST_WARMUP_ITERS     8
 
 /*
  * quick_snapshot architecture (aligned with quick_network):
@@ -156,6 +173,39 @@ static void qs_stop_camera_pipes(aicam_bool_t need_ai)
     camera_deinit_but_not_unregister();
 }
 
+#if QS_AE_STABLE_GATE
+/* Wait until the AE loop's exposure/gain stop changing (or the bound expires).
+ * camera_ae_* read the restart-state struct the ISP middleware refreshes on
+ * every AE update, so this tracks real convergence without touching the
+ * middleware itself. */
+static void qs_wait_ae_stable(void)
+{
+    uint32_t t0 = HAL_GetTick();
+    uint32_t hold_ms = 0;
+    uint32_t last_e = 0, last_g = 0;
+    aicam_bool_t have_last = AICAM_FALSE;
+
+    while ((HAL_GetTick() - t0) < QS_AE_STABLE_MAX_MS) {
+        if (camera_ae_last_valid()) {
+            uint32_t e = 0, g = 0;
+            camera_ae_get_last(&e, &g);
+            if (have_last && e == last_e && g == last_g) {
+                hold_ms += QS_AE_STABLE_POLL_MS;
+                if (hold_ms >= QS_AE_STABLE_HOLD_MS) {
+                    return;
+                }
+            } else {
+                hold_ms = 0;
+                last_e = e;
+                last_g = g;
+                have_last = AICAM_TRUE;
+            }
+        }
+        osDelay(QS_AE_STABLE_POLL_MS);
+    }
+}
+#endif
+
 static int qs_prepare_camera_and_jpeg(const qs_snapshot_config_t *cfg, const nn_model_info_t *model_info_opt)
 {
     if (!cfg) return AICAM_ERROR_INVALID_PARAM;
@@ -225,6 +275,25 @@ static int qs_prepare_camera_and_jpeg(const qs_snapshot_config_t *cfg, const nn_
         }
         (void)device_ioctl(s_cam_dev, CAM_CMD_SET_STARTUP_SKIP_FRAMES, NULL, cfg->fast_capture_skip_frames);
     }
+
+    /* Resume AE from the persisted last state: camera_start() hooks the
+     * restart state, so AEC init starts from these values instead of the
+     * black frame. Invalid/absent record silently falls back to the legacy
+     * black-frame path. */
+    {
+        camera_ae_state_record_t ae_rec = {0};
+        if (storage_nvs_read(NVS_USER, NVS_KEY_AE_LAST_STATE,
+                             &ae_rec, sizeof(ae_rec)) == (int)sizeof(ae_rec) &&
+            ae_rec.magic == CAMERA_AE_STATE_MAGIC) {
+            if (camera_ae_set_last(ae_rec.exposure_us, ae_rec.gain_mdb) == AICAM_OK) {
+                QT_TRACE("[QS] ", "ae resume e=%lu g=%lu",
+                         (unsigned long)ae_rec.exposure_us,
+                         (unsigned long)ae_rec.gain_mdb);
+            }
+        }
+    }
+    /* Speed up the first AE iterations in case we still start near black */
+    isp_ae_request_fast_warmup(QS_AE_FAST_WARMUP_ITERS);
 
     /* start camera (device layer handles sensor/pipes bring-up) */
     ret = device_start(s_cam_dev);
@@ -343,6 +412,13 @@ static void qs_snapshot_thread(void *argument)
         return;
     }
     qt_prof_step(&prof, "[QS] snap:prep ");
+
+#if QS_AE_STABLE_GATE
+    /* Wait for AE to settle before grabbing the frame (bounded). The skip-frame
+     * count set above still enforces its own minimum wait inside the getter. */
+    qs_wait_ae_stable();
+    qt_prof_step(&prof, "[QS] snap:aestb ");
+#endif
 
     /* capture pipe1 buffer (+ pipe2 buffer if AI) */
     camera_buffer_with_frame_id_t pipe1 = {0};

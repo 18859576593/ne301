@@ -29,7 +29,10 @@
 #include "quick_snapshot.h"
 #include "cJSON.h"
 #include "webhook_service.h"
-#include "api_ota_module.h" 
+#include "api_ota_module.h"
+#include "camera.h"
+#include "storage.h"
+#include "json_config_internal.h"
  
  /* ==================== System Controller Implementation ==================== */
  
@@ -2004,7 +2007,24 @@ static aicam_result_t prepare_for_sleep(void)
     if (result != AICAM_OK) {
         LOG_SVC_WARN("Failed to save config before sleep: %d", result);
     }
-    
+
+    // Persist the last convergent AE exposure/gain so the next wake resumes AE
+    // near its convergent point instead of re-converging from a black frame.
+    {
+        camera_ae_state_record_t ae_rec = {0};
+        uint32_t exposure_us = 0, gain_mdb = 0;
+        camera_ae_get_last(&exposure_us, &gain_mdb);
+        if (camera_ae_last_valid()) {
+            ae_rec.magic = CAMERA_AE_STATE_MAGIC;
+            ae_rec.exposure_us = exposure_us;
+            ae_rec.gain_mdb = gain_mdb;
+            if (storage_nvs_write(NVS_USER, NVS_KEY_AE_LAST_STATE,
+                                  &ae_rec, sizeof(ae_rec)) != 0) {
+                LOG_SVC_WARN("Failed to persist AE state before sleep");
+            }
+        }
+    }
+
     // Set system state to sleep
     system_controller_set_state(controller, SYSTEM_STATE_SLEEP);
     

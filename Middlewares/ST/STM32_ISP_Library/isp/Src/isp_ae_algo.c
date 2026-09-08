@@ -57,6 +57,18 @@ static ISP_IQParamTypeDef *IQParamConfig;
 static ISP_SensorInfoTypeDef *pSensorInfo;
 static uint32_t previous_lux = 0;
 
+/* Fast warmup (quick snapshot path): relax the black-frame creep step for the
+ * first N AE iterations so AE escapes the min-exposure start condition faster
+ * when no persisted state is available. 0 = disabled (production default). */
+#define AE_FAST_WARMUP_EXPOSURE_STEP_US  8000
+#define AE_FAST_WARMUP_GAIN_STEP_MDB     12000
+static uint32_t ae_fast_warmup_iters = 0;
+
+void isp_ae_request_fast_warmup(uint32_t iterations)
+{
+  ae_fast_warmup_iters = iterations;
+}
+
 /* Global variables ----------------------------------------------------------*/
 /* Private functions ---------------------------------------------------------*/
 /**
@@ -217,7 +229,15 @@ void isp_ae_get_new_exposure(uint32_t lux, uint32_t averageL, uint32_t *pExposur
    * in order to capture enough light and make a first non-zero estimate of lux */
   if (averageL <= 5 && exposure == pSensorInfo->exposure_min && gain == pSensorInfo->gain_min)
   {
-    new_global_exposure = gain ? exposure * pow(10, ((double)gain + 3000) / 20000) : exposure + 2000;
+    uint32_t creep_exposure_us = 2000;
+    uint32_t creep_gain_mdb = 3000;
+    if (ae_fast_warmup_iters > 0)
+    {
+      creep_exposure_us = AE_FAST_WARMUP_EXPOSURE_STEP_US;
+      creep_gain_mdb = AE_FAST_WARMUP_GAIN_STEP_MDB;
+      ae_fast_warmup_iters--;
+    }
+    new_global_exposure = gain ? exposure * pow(10, ((double)gain + creep_gain_mdb) / 20000) : exposure + creep_exposure_us;
     if (new_global_exposure <= pSensorInfo->exposure_max)
     {
       *pGain = 0;
