@@ -10,7 +10,7 @@ import Slider from '@/components/slider';
 import { useSystemInfo } from '@/store/systemInfo';
 import deviceTool from '@/services/api/deviceTool';
 import H264Player from '@/lib/MSE/h264Player';
-import Loading from '@/components/loading';
+import Player from '@/pages/deviceTool/player';
 import hardwareManagement from '@/services/api/hardware-management';
 import SvgIcon from '@/components/svg-icon';
 import { Input } from '@/components/ui/input';
@@ -45,7 +45,7 @@ export default function Graphics() {
     putIspManualExposureReq,
     postIspConfigSaveReq,
   } = hardwareManagement;
-  const { toggleAiReq, startVideoStreamReq, stopVideoStreamReq } = deviceTool;
+  const { toggleAiReq } = deviceTool;
   const [connectionStatus, setConnectionStatus] = useState('');
   const [brightness, setBrightness] = useState(0);
   const [contrast, setContrast] = useState(0);
@@ -87,10 +87,9 @@ export default function Graphics() {
   // const [ispEstimatedLux, setIspEstimatedLux] = useState<number | null>(null);
   // const [ispManualSensorGain, setIspManualSensorGain] = useState(0);
   // const [ispManualExposureTime, setIspManualExposureTime] = useState(0);
-  const playerRef = useRef<HTMLVideoElement>(null);
-  const [playerLoading, setPlayerLoading] = useState(false);
+  // Shared with the <Player> component below (deviceTool's proven video path)
+  const playerInstanceRef = useRef<H264Player | null>(null);
   const [loading, setLoading] = useState(false);
-  let playerRender: H264Player | null = null;
   // ----------Skeleton screen
   const skeletonScreen = () => (
     <div className="flex flex-col gap-2 w-full">
@@ -123,31 +122,16 @@ export default function Graphics() {
   // the tab is closed. `cancelled` is re-checked after every await for the
   // same reason.
   useEffect(() => {
-    let cancelled = false;
     (async () => {
       initData();
-      await toggleAiReq({ ai_enabled: false });
+      // Clean preview without AI overlays. The <Player> component below owns
+      // the video stream lifecycle (start/stop/reload), same as deviceTool.
       try {
-        setPlayerLoading(true);
-        await startVideoStreamReq();
-        if (cancelled || !playerRef.current) return;
-        const video = playerRef.current;
-        const player = new H264Player(() => {});
-        playerRender = player;
-        player.initPlayer(video);
-        player.start(getWebSocketUrl());
+        await toggleAiReq({ ai_enabled: false });
       } catch (error) {
         console.error(error);
-      } finally {
-        setPlayerLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-      playerRender?.destroy();
-      playerRender = null;
-      stopVideoStreamReq();
-    };
   }, []);
 
   // Connection label only - cheap, never touches the stream.
@@ -374,20 +358,11 @@ export default function Graphics() {
           {connectionStatus === 'connected' && (
             <>
               <Separator />
-              <div className="flex justify-between relative bg-black">
-                <video
-                  ref={playerRef as React.Ref<HTMLVideoElement>}
-                  id="player"
-                  className="w-full aspect-video"
-                  muted
-                  playsInline
-                  disableRemotePlayback
+              <div className="relative bg-black">
+                <Player
+                  videoUrl={getWebSocketUrl()}
+                  videoRendererInstance={playerInstanceRef}
                 />
-                {playerLoading && (
-                  <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-                    <Loading placeholder="Loading..." />
-                  </div>
-                )}
               </div>
               {loading ? (
                 skeletonScreen()
