@@ -6,7 +6,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Switch } from '@/components/ui/switch';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/tooltip';
-// import Slider from '@/components/slider'; // ISP group (temporarily disabled)
+import Slider from '@/components/slider';
 import { useSystemInfo } from '@/store/systemInfo';
 import deviceTool from '@/services/api/deviceTool';
 import H264Player from '@/lib/MSE/h264Player';
@@ -39,6 +39,11 @@ export default function Graphics() {
     setHardwareInfoReq,
     getIspProfileExportReq,
     postIspProfileImportReq,
+    getIspAecReq,
+    putIspAecReq,
+    getIspManualExposureReq,
+    putIspManualExposureReq,
+    postIspConfigSaveReq,
   } = hardwareManagement;
   const { toggleAiReq, startVideoStreamReq, stopVideoStreamReq } = deviceTool;
   const [connectionStatus, setConnectionStatus] = useState('');
@@ -51,6 +56,13 @@ export default function Graphics() {
   const ISP_MODE_CUSTOM = 255;
   const [ispMode, setIspMode] = useState(0);
   const [grayscale, setGrayscale] = useState(false);
+  // ---------- Exposure control (manual exposure slider) ----------
+  const [exposureSectionOpen, setExposureSectionOpen] = useState(true);
+  const [exposureAuto, setExposureAuto] = useState(true);
+  const [manualExposure, setManualExposure] = useState(10000); // µs
+  const [manualGain, setManualGain] = useState(0); // mB
+  const [exposureRange, setExposureRange] = useState({ min: 1000, max: 30000 });
+  const [gainRange, setGainRange] = useState({ min: 0, max: 72000 });
   const ispImportInputRef = useRef<HTMLInputElement>(null);
   const [luxRefDialogOpen, setLuxRefDialogOpen] = useState(false);
   const [luxRefForm, setLuxRefForm] = useState({
@@ -158,7 +170,38 @@ export default function Graphics() {
       if (typeof res.data.grayscale === 'boolean') {
         setGrayscale(res.data.grayscale);
       }
-      // TODO: when ISP APIs are wired, hydrate ISP exposure state from /api/v1/isp/aec, /aec/manual, /sensor_delay, /statistics, etc.
+      // Hydrate exposure control state from the ISP endpoints
+      try {
+        const [aecRes, manualRes] = await Promise.all([
+          getIspAecReq(),
+          getIspManualExposureReq(),
+        ]);
+        if (typeof aecRes.data.enable === 'boolean') {
+          setExposureAuto(aecRes.data.enable);
+        }
+        if (
+          typeof manualRes.data.exposure === 'number' &&
+          manualRes.data.exposure > 0
+        ) {
+          setManualExposure(manualRes.data.exposure);
+        }
+        if (typeof manualRes.data.gain === 'number') {
+          setManualGain(manualRes.data.gain);
+        }
+        const em = manualRes.data._meta?.exposure;
+        if (em && typeof em.max === 'number' && em.max > 0) {
+          setExposureRange({
+            min: Math.max(1000, em.min ?? 1000),
+            max: Math.min(em.max, 30000),
+          });
+        }
+        const gm = manualRes.data._meta?.gain;
+        if (gm && typeof gm.max === 'number' && gm.max > 0) {
+          setGainRange({ min: gm.min ?? 0, max: gm.max });
+        }
+      } catch (error) {
+        console.error(error);
+      }
     } catch (error) {
       console.error(error);
     } finally {
@@ -234,6 +277,76 @@ export default function Graphics() {
       );
     } catch (error) {
       console.error(error);
+    }
+  };
+
+  // ---------- Exposure control handlers ----------
+  // Switch auto/manual. Going manual applies the current slider values right
+  // away (exposure is clamped to a safe non-zero floor: a zero-length manual
+  // exposure produces black frames).
+  const handleExposureAutoChange = async (auto: boolean) => {
+    setExposureAuto(auto);
+    try {
+      if (!auto) {
+        const exposure = Math.min(
+          Math.max(manualExposure, exposureRange.min),
+          exposureRange.max
+        );
+        setManualExposure(exposure);
+        await putIspAecReq({ enable: false });
+        await putIspManualExposureReq({ exposure, gain: manualGain });
+      } else {
+        await putIspAecReq({ enable: true });
+      }
+      toast.success(
+        i18n._('sys.hardware_management.exposure_mode_applied_toast')
+      );
+    } catch (error) {
+      console.error(error);
+      setExposureAuto(!auto);
+      toast.error(i18n._('sys.hardware_management.exposure_apply_failed_toast'));
+    }
+  };
+
+  // Slider commits on release (onChangeEnd) / input on blur, so dragging does
+  // not spam the device with PUTs.
+  const applyManualExposure = async (value: number) => {
+    const v = Math.min(
+      Math.max(Math.round(value) || exposureRange.min, exposureRange.min),
+      exposureRange.max
+    );
+    setManualExposure(v);
+    if (exposureAuto) return;
+    try {
+      await putIspManualExposureReq({ exposure: v });
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const applyManualGain = async (value: number) => {
+    const v = Math.min(
+      Math.max(Math.round(value) || gainRange.min, gainRange.min),
+      gainRange.max
+    );
+    setManualGain(v);
+    if (exposureAuto) return;
+    try {
+      await putIspManualExposureReq({ gain: v });
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
+  const saveExposureAsBootConfig = async () => {
+    try {
+      await postIspConfigSaveReq();
+      toast.success(
+        i18n._('sys.hardware_management.exposure_boot_saved_toast')
+      );
+    } catch (error) {
+      console.error(error);
+      toast.error(i18n._('sys.hardware_management.exposure_apply_failed_toast'));
     }
   };
 
@@ -514,6 +627,166 @@ export default function Graphics() {
                               }
                             }}
                           />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  <Separator />
+                  {/* Exposure control (manual exposure slider, /isp/aec + /isp/aec/manual) */}
+                  <div className="flex flex-col gap-2">
+                    <button
+                      type="button"
+                      className="flex w-full items-center justify-between text-left"
+                      onClick={() => setExposureSectionOpen(o => !o)}
+                    >
+                      <Label>
+                        {i18n._('sys.hardware_management.exposure_control')}
+                      </Label>
+                      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-gray-500">
+                        <SvgIcon
+                          icon="right"
+                          className={`h-4 w-4 transition-transform duration-200 ${
+                            exposureSectionOpen ? 'rotate-90' : 'rotate-0'
+                          }`}
+                        />
+                      </span>
+                    </button>
+                    {exposureSectionOpen && (
+                      <div className="border border-gray-200 border-solid p-4 rounded-md mt-2 flex flex-col gap-2">
+                        <div className="flex justify-between gap-4 items-center">
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Label className="shrink-0">
+                              {i18n._('sys.hardware_management.exposure_auto')}
+                            </Label>
+                            <Tooltip mbEnhance>
+                              <TooltipTrigger>
+                                <div className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-gray-500">
+                                  <SvgIcon
+                                    className="h-4 w-4 text-gray-500"
+                                    icon="info"
+                                  />
+                                </div>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-80 text-pretty">
+                                <p>
+                                  {i18n._(
+                                    'sys.hardware_management.exposure_auto_hint'
+                                  )}
+                                </p>
+                              </TooltipContent>
+                            </Tooltip>
+                          </div>
+                          <Switch
+                            checked={exposureAuto}
+                            onCheckedChange={handleExposureAutoChange}
+                          />
+                        </div>
+                        <Separator />
+                        <div className="flex flex-col gap-2">
+                          <div className="flex justify-between gap-4 items-center">
+                            <Label>
+                              {i18n._('sys.hardware_management.exposure_time')}
+                            </Label>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm text-gray-500 min-w-[4rem] text-right">
+                                {(manualExposure / 1000).toFixed(1)} ms
+                              </span>
+                              <Input
+                                className="w-24 text-right"
+                                type="number"
+                                min={exposureRange.min}
+                                max={exposureRange.max}
+                                step={500}
+                                disabled={exposureAuto}
+                                value={manualExposure}
+                                onChange={e => {
+                                  const v = Number(
+                                    (e.target as HTMLInputElement).value || 0
+                                  );
+                                  setManualExposure(v);
+                                }}
+                                onBlur={e => {
+                                  const v = Number(
+                                    (e.target as HTMLInputElement).value || 0
+                                  );
+                                  applyManualExposure(v);
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <Slider
+                            min={exposureRange.min}
+                            max={exposureRange.max}
+                            step={500}
+                            disabled={exposureAuto}
+                            value={manualExposure}
+                            onChange={setManualExposure}
+                            onChangeEnd={applyManualExposure}
+                          />
+                          <p className="text-xs text-gray-400">
+                            {i18n._('sys.hardware_management.exposure_time_hint')}
+                          </p>
+                        </div>
+                        <Separator />
+                        <div className="flex flex-col gap-2">
+                          <div className="flex justify-between gap-4 items-center">
+                            <Label>
+                              {i18n._('sys.hardware_management.sensor_gain')}
+                            </Label>
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm text-gray-500 min-w-[3rem] text-right">
+                                {(manualGain / 1000).toFixed(1)} dB
+                              </span>
+                              <Input
+                                className="w-24 text-right"
+                                type="number"
+                                min={gainRange.min}
+                                max={gainRange.max}
+                                step={500}
+                                disabled={exposureAuto}
+                                value={manualGain}
+                                onChange={e => {
+                                  const v = Number(
+                                    (e.target as HTMLInputElement).value || 0
+                                  );
+                                  setManualGain(v);
+                                }}
+                                onBlur={e => {
+                                  const v = Number(
+                                    (e.target as HTMLInputElement).value || 0
+                                  );
+                                  applyManualGain(v);
+                                }}
+                              />
+                            </div>
+                          </div>
+                          <Slider
+                            min={gainRange.min}
+                            max={gainRange.max}
+                            step={500}
+                            disabled={exposureAuto}
+                            value={manualGain}
+                            onChange={setManualGain}
+                            onChangeEnd={applyManualGain}
+                          />
+                          <p className="text-xs text-gray-400">
+                            {i18n._('sys.hardware_management.sensor_gain_hint')}
+                          </p>
+                        </div>
+                        <Separator />
+                        <div className="flex justify-between gap-4 items-center">
+                          <p className="text-xs text-gray-400 flex-1 m-0">
+                            {i18n._('sys.hardware_management.exposure_boot_hint')}
+                          </p>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="shrink-0"
+                            onClick={saveExposureAsBootConfig}
+                          >
+                            {i18n._('sys.hardware_management.exposure_save_boot')}
+                          </Button>
                         </div>
                       </div>
                     )}

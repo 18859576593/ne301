@@ -350,7 +350,19 @@
       "fast_capture_resolution": "分辨率",
       "fast_capture_jpeg_quality": "JPEG 质量",
       "capture_disable_comm": "抓拍后仅存储本地",
-      "capture_storage_ai": "存储 AI 画框结果图"
+      "capture_storage_ai": "存储 AI 画框结果图",
+      "exposure_control": "曝光控制",
+      "exposure_auto": "自动曝光",
+      "exposure_auto_hint": "关闭后使用下方手动曝光时间与增益，画面亮度固定不再自适应；切换到手动时会立即应用当前滑块值",
+      "exposure_time": "曝光时间",
+      "exposure_time_hint": "单位微秒（µs）。50Hz 灯光环境建议取 10000 的整数倍以避免频闪条纹；超过 20000 会降低帧率",
+      "sensor_gain": "传感器增益",
+      "sensor_gain_hint": "手动增益单位 mB（0–72000，约 0–72 dB），与手动曝光配合使用；自动模式下由 AE 算法控制",
+      "exposure_save_boot": "保存为开机配置",
+      "exposure_boot_hint": "保存后设备以自定义 ISP 配置开机（含手动曝光/增益；室内/室外模式将不再生效，直至重新导入配置或恢复默认）",
+      "exposure_boot_saved_toast": "已保存为开机配置（自定义 ISP 模式）",
+      "exposure_mode_applied_toast": "曝光模式已切换",
+      "exposure_apply_failed_toast": "操作失败，请重试"
     },
     "system_management": {
       "communication_title": "通讯管理",

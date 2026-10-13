@@ -45,6 +45,40 @@ export interface SetSysClkConfigReq {
     sys_clk_profile: SysClkProfileId;
 }
 
+/** AEC state — GET/PUT /api/v1/isp/aec */
+export interface IspAecRes {
+    enable: boolean;
+    exposure_compensation: number;
+    exposure_target?: number;
+    anti_flicker_freq?: number;
+}
+
+export interface IspAecReq {
+    enable?: boolean;
+    exposure_compensation?: number;
+}
+
+/** Manual sensor exposure/gain — GET/PUT /api/v1/isp/aec/manual (gain in mB, exposure in µs) */
+export interface IspRangeMeta {
+    min: number;
+    max: number;
+    unit?: string;
+}
+
+export interface IspManualExposureRes {
+    gain: number;
+    exposure: number;
+    _meta?: {
+        gain?: IspRangeMeta;
+        exposure?: IspRangeMeta;
+    };
+}
+
+export interface IspManualExposureReq {
+    gain?: number;
+    exposure?: number;
+}
+
 const hardwareManagement = {
     getHardwareInfoReq: () => request.get('/api/v1/device/image/config'),
     setHardwareInfoReq: (data: SetHardwareInfoReq) => request.post('/api/v1/device/image/config', data),
@@ -52,6 +86,11 @@ const hardwareManagement = {
     setSysClkConfigReq: (data: SetSysClkConfigReq) => request.post('/api/v1/device/sys-clk/config', data),
     getIspProfileExportReq: () => request.get('/api/v1/isp/config/export'),
     postIspProfileImportReq: (body: Record<string, unknown>) => request.post('/api/v1/isp/config/import', body),
+    getIspAecReq: () => request.get<IspAecRes>('/api/v1/isp/aec'),
+    putIspAecReq: (data: IspAecReq) => request.put('/api/v1/isp/aec', data),
+    getIspManualExposureReq: () => request.get<IspManualExposureRes>('/api/v1/isp/aec/manual'),
+    putIspManualExposureReq: (data: IspManualExposureReq) => request.put('/api/v1/isp/aec/manual', data),
+    postIspConfigSaveReq: () => request.post('/api/v1/isp/config/save'),
     getLightConfigReq: () => request.get('/api/v1/device/light/config'),
     setLightConfigReq: (data: SetLightConfigReq) => request.post('/api/v1/device/light/config', data),
 }

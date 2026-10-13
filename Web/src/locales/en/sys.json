@@ -351,7 +351,19 @@
       "fast_capture_resolution": "Resolution",
       "fast_capture_jpeg_quality": "JPEG quality",
       "capture_disable_comm": "Local storage only after capture",
-      "capture_storage_ai": "Save AI-drawn result image to storage"
+      "capture_storage_ai": "Save AI-drawn result image to storage",
+      "exposure_control": "Exposure Control",
+      "exposure_auto": "Auto Exposure",
+      "exposure_auto_hint": "Turn off to fix brightness with the manual exposure time and gain below; the current slider values are applied immediately when switching to manual",
+      "exposure_time": "Exposure Time",
+      "exposure_time_hint": "In microseconds. Under 50Hz lighting use multiples of 10000 to avoid banding; values above 20000 reduce the frame rate",
+      "sensor_gain": "Sensor Gain",
+      "sensor_gain_hint": "Manual gain in mB (0-72000, about 0-72 dB), used together with manual exposure; controlled by the AE algorithm in auto mode",
+      "exposure_save_boot": "Save as Boot Config",
+      "exposure_boot_hint": "Saves the current ISP settings (including manual exposure/gain) as the boot configuration. Indoor/outdoor modes stop applying until the profile is re-imported or reset",
+      "exposure_boot_saved_toast": "Saved as boot config (custom ISP mode)",
+      "exposure_mode_applied_toast": "Exposure mode switched",
+      "exposure_apply_failed_toast": "Operation failed, please retry"
     },
     "system_management": {
       "communication_title": "Communications",
