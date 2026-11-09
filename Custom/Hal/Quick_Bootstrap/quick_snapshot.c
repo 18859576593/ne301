@@ -2,6 +2,8 @@
 #include "quick_storage.h"
 #include "storage.h"
 #include "json_config_internal.h"
+#include "generic_file.h"
+#include "rtc.h"
 
 /* ---- AE verification-based fast convergence (QS_AE_VERIFY) ----
  * Compile switch: 0 = stock official QS behavior (fixed skip wait);
@@ -65,6 +67,51 @@
  */
 
 static osEventFlagsId_t s_evt = NULL;
+
+/* ---- capture diagnostic log (flash file, append per wake) ----
+ * One CSV line per capture: timestamp, day/night mode, AE seed restored,
+ * verify exit code, luminance at exit, elapsed verify time, final E/G,
+ * JPEG size, frame ID. Persisted to /capture_ae.log on the flash FS.
+ * Read it after a multi-day soak test: serial CLI "cat /capture_ae.log"
+ * or web download. */
+#define QS_AE_LOG_PATH  "/capture_ae.log"
+
+static void qs_log_capture_ae(int verify_exit, uint8_t exit_luma,
+                              uint32_t verify_ms, uint32_t final_e,
+                              uint32_t final_g, uint32_t jpeg_size,
+                              uint32_t frame_id, uint32_t seed_e,
+                              uint32_t seed_g, uint8_t seed_hit)
+{
+    char line[192];
+    RTC_TIME_S t;
+    uint32_t mode = 0xFF;
+    int len;
+
+    t = rtc_get_time();
+    /* isp_mode from NVS: 0=DAY/OUTDOOR, 1=INDOOR, 2=NIGHT, 3=AUTO */
+    {
+        uint32_t v = 0xFF;
+        (void)storage_nvs_read(NVS_USER, NVS_KEY_IMAGE_ISP_MODE, &v, sizeof(v));
+        mode = v;
+    }
+
+    len = snprintf(line, sizeof(line),
+        "20%02d-%02d-%02d %02d:%02d:%02d,mode=%lu,seed=%u,e0=%lu,g0=%lu,"
+        "exit=%d,L=%u,vms=%lu,e=%lu,g=%lu,jpg=%lu,fid=%lu\r\n",
+        t.year, t.month, t.date, t.hour, t.minute, t.second,
+        (unsigned long)mode, seed_hit, (unsigned long)seed_e, (unsigned long)seed_g,
+        verify_exit, exit_luma, (unsigned long)verify_ms,
+        (unsigned long)final_e, (unsigned long)final_g,
+        (unsigned long)jpeg_size, (unsigned long)frame_id);
+
+    if (len <= 0) return;
+
+    void *fd = file_fopen(QS_AE_LOG_PATH, "a");
+    if (!fd) return;
+    (void)file_fwrite(fd, line, (size_t)len);
+    (void)file_fflush(fd);
+    (void)file_fclose(fd);
+}
 static osThreadId_t s_snap_tid = NULL;
 static osThreadId_t s_ai_tid = NULL;
 static aicam_bool_t s_inited = AICAM_FALSE;
@@ -339,7 +386,8 @@ static int qs_prepare_camera_and_jpeg(const qs_snapshot_config_t *cfg, const nn_
  * keeps moving between write and effect, a "latest-write" seed lands at a
  * random cycle phase and alternates the next wake's starting point. */
 static int qs_wait_ae_verified(uint32_t budget_ms,
-                               uint32_t *seed_e, uint32_t *seed_g)
+                               uint32_t *seed_e, uint32_t *seed_g,
+                               uint8_t *out_luma, uint32_t *out_ms)
 {
     uint32_t t0 = HAL_GetTick();
     uint8_t tgt = 0, L = 0, L_prev = 0;
@@ -353,6 +401,8 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
 
     if (camera_ae_get_target(&tgt) != AICAM_OK) {
         QT_TRACE("[QS] ", "verify: no target, fall through");
+        if (out_luma) *out_luma = 0;
+        if (out_ms) *out_ms = 0;
         return 3;
     }
     QT_TRACE("[QS] ", "verify begin tgt=%u budget=%lums",
@@ -412,6 +462,8 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
             QT_TRACE("[QS] ", "verify exit=1 inband L=%u e=%lu g=%lu +%lums",
                      (unsigned)L, (unsigned long)e, (unsigned long)g,
                      (unsigned long)(HAL_GetTick() - t0));
+            if (out_luma) *out_luma = L;
+            if (out_ms) *out_ms = HAL_GetTick() - t0;
             return 1;
         }
         /* clamped-accept: BOTH exposure and gain at their ceilings and luma
@@ -425,6 +477,8 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
             QT_TRACE("[QS] ", "verify exit=2 clamp L=%u e=%lu g=%lu +%lums",
                      (unsigned)L, (unsigned long)e, (unsigned long)g,
                      (unsigned long)(HAL_GetTick() - t0));
+            if (out_luma) *out_luma = L;
+            if (out_ms) *out_ms = HAL_GetTick() - t0;
             return 2;
         }
         L_prev = L;
@@ -434,6 +488,8 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
     }
     QT_TRACE("[QS] ", "verify exit=3 timeout L=%u +%lums",
              (unsigned)L, (unsigned long)(HAL_GetTick() - t0));
+    if (out_luma) *out_luma = L;
+    if (out_ms) *out_ms = HAL_GetTick() - t0;
     return 3;
 }
 #endif
@@ -558,6 +614,8 @@ static void qs_snapshot_thread(void *argument)
 #if QS_AE_VERIFY_ENABLE
     /* convergence gate: judge from stats instead of the fixed skip wait */
     int verify_exit = 3;
+    uint8_t vfy_luma = 0;
+    uint32_t vfy_ms = 0;
     uint32_t seed_e = 0, seed_g = 0;
     {
         pipe_params_t vp = {0};
@@ -570,7 +628,8 @@ static void qs_snapshot_thread(void *argument)
         budget_frames = (s_cfg.fast_capture_skip_frames > QS_VERIFY_MIN_BUDGET_FRAMES)
                         ? s_cfg.fast_capture_skip_frames : QS_VERIFY_MIN_BUDGET_FRAMES;
         verify_exit = qs_wait_ae_verified((budget_frames * 1000U) / fps,
-                                          &seed_e, &seed_g);
+                                          &seed_e, &seed_g,
+                                          &vfy_luma, &vfy_ms);
         qt_prof_step(&prof, "[QS] snap:vfy ");
     }
 #endif
@@ -672,6 +731,19 @@ static void qs_snapshot_thread(void *argument)
                 (void)osEventFlagsSet(s_evt, QS_FLAG_JPEG_READY);
                 QT_TRACE("[QS] ", "jpeg %luB", (unsigned long)s_jpeg_size);
                 qt_prof_step(&prof, "[QS] snap:jpeg ");
+
+#if QS_AE_VERIFY_ENABLE
+                /* persist capture diagnostics to flash for soak-test analysis */
+                {
+                    uint32_t cur_e = 0, cur_g = 0;
+                    camera_ae_get_last(&cur_e, &cur_g);
+                    qs_log_capture_ae(verify_exit, vfy_luma,
+                                      vfy_ms, cur_e, cur_g,
+                                      (uint32_t)s_jpeg_size, s_frame_id,
+                                      seed_e, seed_g,
+                                      (seed_e != 0 || seed_g != 0) ? 1 : 0);
+                }
+#endif
             } else {
                 QT_TRACE("[QS] ", "jpeg out fail %d", out_len);
                 (void)osEventFlagsSet(s_evt, QS_FLAG_ERROR_ABORT);

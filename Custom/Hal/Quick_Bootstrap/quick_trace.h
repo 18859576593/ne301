@@ -39,7 +39,7 @@
 /* ---- optional lightweight traces/profiling (compile-time only).
  * Keep default OFF to avoid extra runtime overhead in production builds. */
 #ifndef QB_TRACE_ENABLE
-#define QB_TRACE_ENABLE     0
+#define QB_TRACE_ENABLE     1
 #endif
 
 #ifndef QB_TIMELOG_ENABLE
