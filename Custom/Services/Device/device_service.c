@@ -1062,6 +1062,13 @@ static void day_night_apply(uint32_t effective)
     g_device_service.dn_pending_count = 0U;
     g_device_service.dn_last_switch_ms = (uint32_t)rtc_get_uptime_ms();
     LOG_SVC_INFO("Day/Night applied: %s", night ? "night" : "day");
+    /* Persist switch event to capture_ae.log for soak-test analysis */
+    {
+        extern void qs_log_day_night_switch(uint32_t to_mode, uint8_t ir_on, uint8_t ir_brightness);
+        qs_log_day_night_switch(effective,
+                                night ? 1 : 0,
+                                g_device_service.day_night_config.ir_brightness);
+    }
 }
 
 /* TIME source: night when current time is inside the configured window. */
