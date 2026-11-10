@@ -65,6 +65,81 @@
  */
 
 static osEventFlagsId_t s_evt = NULL;
+
+/* ---- capture diagnostic log (flash file, append per wake) ----
+ * One CSV line per capture + one line per day/night switch event.
+ * Capture line: timestamp, effective day/night mode, AE target, seed,
+ * verify exit, luminance, verify ms, extended flag, final E/G, JPEG size,
+ * frame ID. Persisted to /capture_ae.log on the flash FS. */
+#define QS_AE_LOG_PATH  "/capture_ae.log"
+
+/* Read the runtime effective day/night mode from device_service (0=DAY,
+ * 2=NIGHT). Falls back to 9 if unavailable (standard board / not init). */
+static uint32_t qs_log_get_eff_mode(void)
+{
+    day_night_status_t st;
+    if (device_service_day_night_get_status(&st) == AICAM_OK) {
+        return st.effective_mode;
+    }
+    return 9;
+}
+
+static void qs_log_capture_ae(int verify_exit, uint8_t exit_luma,
+                              uint32_t verify_ms, uint32_t final_e,
+                              uint32_t final_g, uint32_t jpeg_size,
+                              uint32_t frame_id, uint32_t seed_e,
+                              uint32_t seed_g, uint8_t seed_hit,
+                              uint8_t ae_target, uint8_t extended)
+{
+    char line[224];
+    RTC_TIME_S t;
+    uint32_t eff_mode;
+    int len;
+
+    t = rtc_get_time();
+    eff_mode = qs_log_get_eff_mode();
+
+    len = snprintf(line, sizeof(line),
+        "20%02d-%02d-%02d %02d:%02d:%02d,eff=%lu,tgt=%u,seed=%u,e0=%lu,g0=%lu,"
+        "exit=%d,L=%u,vms=%lu,ext=%u,e=%lu,g=%lu,jpg=%lu,fid=%lu\r\n",
+        t.year, t.month, t.date, t.hour, t.minute, t.second,
+        (unsigned long)eff_mode, ae_target, seed_hit,
+        (unsigned long)seed_e, (unsigned long)seed_g,
+        verify_exit, exit_luma, (unsigned long)verify_ms, extended,
+        (unsigned long)final_e, (unsigned long)final_g,
+        (unsigned long)jpeg_size, (unsigned long)frame_id);
+
+    if (len <= 0) return;
+
+    void *fd = file_fopen(QS_AE_LOG_PATH, "a");
+    if (!fd) return;
+    (void)file_fwrite(fd, line, (size_t)len);
+    (void)file_fflush(fd);
+    (void)file_fclose(fd);
+}
+
+/* Log a day/night switch event (called from device_service via the
+ * day-night apply path). Public so device_service.c can call it. */
+void qs_log_day_night_switch(uint32_t to_mode, uint8_t ir_on, uint8_t ir_brightness)
+{
+    char line[128];
+    RTC_TIME_S t;
+    int len;
+
+    t = rtc_get_time();
+    len = snprintf(line, sizeof(line),
+        "20%02d-%02d-%02d %02d:%02d:%02d,DN_SW,to=%lu,ir_on=%u,ir_br=%u\r\n",
+        t.year, t.month, t.date, t.hour, t.minute, t.second,
+        (unsigned long)to_mode, ir_on, ir_brightness);
+
+    if (len <= 0) return;
+
+    void *fd = file_fopen(QS_AE_LOG_PATH, "a");
+    if (!fd) return;
+    (void)file_fwrite(fd, line, (size_t)len);
+    (void)file_fflush(fd);
+    (void)file_fclose(fd);
+}
 static osThreadId_t s_snap_tid = NULL;
 static osThreadId_t s_ai_tid = NULL;
 static aicam_bool_t s_inited = AICAM_FALSE;
@@ -339,7 +414,9 @@ static int qs_prepare_camera_and_jpeg(const qs_snapshot_config_t *cfg, const nn_
  * keeps moving between write and effect, a "latest-write" seed lands at a
  * random cycle phase and alternates the next wake's starting point. */
 static int qs_wait_ae_verified(uint32_t budget_ms,
-                               uint32_t *seed_e, uint32_t *seed_g)
+                               uint32_t *seed_e, uint32_t *seed_g,
+                               uint8_t *out_luma, uint32_t *out_ms,
+                               uint8_t *out_tgt, uint8_t *out_ext)
 {
     uint32_t t0 = HAL_GetTick();
     uint8_t tgt = 0, L = 0, L_prev = 0;
@@ -353,6 +430,10 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
 
     if (camera_ae_get_target(&tgt) != AICAM_OK) {
         QT_TRACE("[QS] ", "verify: no target, fall through");
+        if (out_luma) *out_luma = 0;
+        if (out_ms) *out_ms = 0;
+        if (out_tgt) *out_tgt = 0;
+        if (out_ext) *out_ext = 0;
         return 3;
     }
     QT_TRACE("[QS] ", "verify begin tgt=%u budget=%lums",
@@ -412,19 +493,30 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
             QT_TRACE("[QS] ", "verify exit=1 inband L=%u e=%lu g=%lu +%lums",
                      (unsigned)L, (unsigned long)e, (unsigned long)g,
                      (unsigned long)(HAL_GetTick() - t0));
+            if (out_luma) *out_luma = L;
+            if (out_ms) *out_ms = HAL_GetTick() - t0;
+            if (out_tgt) *out_tgt = tgt;
+            if (out_ext) *out_ext = extended_from;
             return 1;
         }
         /* clamped-accept: BOTH exposure and gain at their ceilings and luma
-         * settled -> this is the best the scene allows. Exposure alone is
-         * NOT sufficient: in dim scenes exposure sits at its ceiling while
-         * gain is still ramping. */
+         * settled -> this is the best the scene allows.
+         * Gain ceiling = the SENSOR DRIVER's true max (os04c10_reg.h:
+         * OS04C10_GAIN_MAX = 72000mdb), NOT the app-layer GAIN_MAX(15872) —
+         * using the app constant cut the AE climb short at G~20000 in
+         * dark scenes (field log 11-09: stuck at G=20261, L=3, while the
+         * sensor could reach G=72000). */
         dl = (uint8_t)(L_prev > L ? (L_prev - L) : (L - L_prev));
         if (have_prev &&
-            e >= EXPOSURE_MAX && g >= ((GAIN_MAX / 100U) * 95U) &&
+            e >= EXPOSURE_MAX && g >= 68000U &&
             dl <= QS_VERIFY_CLAMP_DL) {
             QT_TRACE("[QS] ", "verify exit=2 clamp L=%u e=%lu g=%lu +%lums",
                      (unsigned)L, (unsigned long)e, (unsigned long)g,
                      (unsigned long)(HAL_GetTick() - t0));
+            if (out_luma) *out_luma = L;
+            if (out_ms) *out_ms = HAL_GetTick() - t0;
+            if (out_tgt) *out_tgt = tgt;
+            if (out_ext) *out_ext = extended_from;
             return 2;
         }
         L_prev = L;
@@ -434,6 +526,10 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
     }
     QT_TRACE("[QS] ", "verify exit=3 timeout L=%u +%lums",
              (unsigned)L, (unsigned long)(HAL_GetTick() - t0));
+    if (out_luma) *out_luma = L;
+    if (out_ms) *out_ms = HAL_GetTick() - t0;
+    if (out_tgt) *out_tgt = tgt;
+    if (out_ext) *out_ext = extended_from;
     return 3;
 }
 #endif
@@ -558,6 +654,10 @@ static void qs_snapshot_thread(void *argument)
 #if QS_AE_VERIFY_ENABLE
     /* convergence gate: judge from stats instead of the fixed skip wait */
     int verify_exit = 3;
+    uint8_t vfy_luma = 0;
+    uint32_t vfy_ms = 0;
+    uint8_t vfy_tgt = 0;
+    uint8_t vfy_ext = 0;
     uint32_t seed_e = 0, seed_g = 0;
     {
         pipe_params_t vp = {0};
@@ -570,7 +670,8 @@ static void qs_snapshot_thread(void *argument)
         budget_frames = (s_cfg.fast_capture_skip_frames > QS_VERIFY_MIN_BUDGET_FRAMES)
                         ? s_cfg.fast_capture_skip_frames : QS_VERIFY_MIN_BUDGET_FRAMES;
         verify_exit = qs_wait_ae_verified((budget_frames * 1000U) / fps,
-                                          &seed_e, &seed_g);
+                                          &seed_e, &seed_g,
+                                          &vfy_luma, &vfy_ms, &vfy_tgt, &vfy_ext);
         qt_prof_step(&prof, "[QS] snap:vfy ");
     }
 #endif
@@ -589,12 +690,21 @@ static void qs_snapshot_thread(void *argument)
         qt_prof_step(&prof, "[QS] snap:pipe1 ");
 #if QS_AE_VERIFY_ENABLE
 #if QS_AE_SEED_LEARN
-        /* Persist the AE seed ONLY when the convergence gate actually
-         * passed (exit=1): a timeout/clamp grab is NOT a converged frame,
-         * and persisting its AE state re-seeds the next wake from a
-         * limit-cycle phase — the wake-to-wake bright/dark alternation
-         * seen in low light. On bad exits the previous good seed stays. */
-        if (verify_exit == 1) {
+        /* Persist the AE seed when the convergence gate passed (exit=1,
+         * in-band) OR when the scene hit its physical ceiling (exit=2,
+         * clamped-accept):
+         * - exit=1: the frame IS converged; save the attributed E/G.
+         * - exit=2: the frame is the best the sensor can physically do
+         *   (E at ceiling, gain at driver max, luma stable). Saving the
+         *   clamped E/G means the NEXT wake starts at the ceiling instead
+         *   of climbing from the profile's static minimum for 243ms —
+         *   in permanently dark scenes (field log 11-09: company lights
+         *   off at 22:00, L=3 all night) this breaks the cold-start
+         *   dead-loop where exit=2 never saved → every wake cold-started.
+         * - exit=3 (timeout): still do NOT save — a timeout means the AE
+         *   was still moving (or stats were unavailable), the grabbed
+         *   frame's state is not representative. */
+        if (verify_exit == 1 || verify_exit == 2) {
             camera_ae_state_record_t rec = {0};
             rec.magic = CAMERA_AE_STATE_MAGIC;
             rec.exposure_us = seed_e;
@@ -603,9 +713,9 @@ static void qs_snapshot_thread(void *argument)
                                   &rec, sizeof(rec)) != (int)sizeof(rec)) {
                 QT_TRACE("[QS] ", "ae save fail");
             } else {
-                QT_TRACE("[QS] ", "ae saved e=%lu g=%lu",
+                QT_TRACE("[QS] ", "ae saved e=%lu g=%lu (exit=%d)",
                          (unsigned long)rec.exposure_us,
-                         (unsigned long)rec.gain_mdb);
+                         (unsigned long)rec.gain_mdb, verify_exit);
             }
         } else {
             QT_TRACE("[QS] ", "ae seed kept (verify exit=%d)", verify_exit);
@@ -672,6 +782,19 @@ static void qs_snapshot_thread(void *argument)
                 (void)osEventFlagsSet(s_evt, QS_FLAG_JPEG_READY);
                 QT_TRACE("[QS] ", "jpeg %luB", (unsigned long)s_jpeg_size);
                 qt_prof_step(&prof, "[QS] snap:jpeg ");
+
+#if QS_AE_VERIFY_ENABLE
+                /* persist capture diagnostics to flash for soak-test analysis */
+                {
+                    uint32_t cur_e = 0, cur_g = 0;
+                    camera_ae_get_last(&cur_e, &cur_g);
+                    qs_log_capture_ae(verify_exit, vfy_luma,
+                                      vfy_ms, cur_e, cur_g,
+                                      (uint32_t)s_jpeg_size, s_frame_id,
+                                      seed_e, seed_g,
+                                      (seed_e != 0 || seed_g != 0) ? 1 : 0, vfy_tgt, vfy_ext);
+                }
+#endif
             } else {
                 QT_TRACE("[QS] ", "jpeg out fail %d", out_len);
                 (void)osEventFlagsSet(s_evt, QS_FLAG_ERROR_ABORT);
