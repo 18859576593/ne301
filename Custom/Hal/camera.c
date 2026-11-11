@@ -14,7 +14,6 @@
 #include "json_config_mgr.h"    /* IMAGE_ISP_MODE_* for camera_fill_isp_iq_for_mode */
 #include "board_hw.h"           /* board_is_ir() for the IR-CUT filter */
 #include "main.h"               /* IR_CUT_A_* pin defines */
-#include "storage.h"            /* storage_nvs_read for IR-CUT restore */
 
 /* AE restart state handed to the ISP middleware (QS fast wake): the AE loop
  * writes its latest convergent exposure/gain here on every update, and AEC
@@ -1063,27 +1062,17 @@ static void cameraProcess(void *argument)
 #if CAMERA_TASK_DELAY_MS > 0
     osDelay(CAMERA_TASK_DELAY_MS);
 #endif
-    /* IR-CUT restore (IR boards): the filter is mechanically held across
-     * power loss, so the physical position matches the last commanded
-     * state. Instead of blindly homing to DAY (which forces a mechanical
-     * movement every wake), read the last effective mode from NVS and
-     * confirm the matching position — zero mechanical movements when the
-     * mode hasn't changed between sleeps (the common case: continuous
-     * night or continuous day). Fallback to DAY for unknown/missing. */
+    /* IR-CUT homing edge (IR boards): the filter driver is edge-driven and
+     * its lens position is unknown after power-up. The pin idles HIGH (strap
+     * pull-up + the camera_init claim), so pulling it LOW here is one
+     * deterministic edge — the LOW level then persists through the whole
+     * CAM_Init sensor bring-up (settle window), homing the filter into the
+     * DAY position. Zero added boot time, completes BEFORE sem_init is
+     * released, and the system boots in DAY mode by default. */
     const aicam_bool_t ircut_home =
         (board_is_ir() == AICAM_TRUE) && (s_ircut_state != 0xFFU);
     if (ircut_home) {
-        uint8_t last_eff = 0;
-        (void)storage_nvs_read(NVS_USER, "dn_last_eff", &last_eff, 1);
-        if (last_eff == 2U) {  /* IMAGE_ISP_MODE_NIGHT */
-            camera_ircut_write(1U); /* HIGH = night: already there */
-            s_ircut_state = 1U;
-            LOG_DRV_INFO("IR-CUT restored to NIGHT (last_eff=%u)", last_eff);
-        } else {
-            camera_ircut_write(0U); /* LOW = day: safe default */
-            s_ircut_state = 0U;
-            LOG_DRV_INFO("IR-CUT restored to DAY (last_eff=%u)", last_eff);
-        }
+        camera_ircut_write(0U); /* LOW = day: the homing edge */
     }
     ret = CAM_Init(camera);
     // printf("camera init end, %lu ms\r\n", HAL_GetTick());
@@ -1093,7 +1082,7 @@ static void cameraProcess(void *argument)
         osThreadExit();
         return;
     }
-    /* s_ircut_state already set in the restore block above */
+    if (ircut_home) s_ircut_state = 0U; /* homed to DAY — LOW stays as the boot default */
     camera->is_init = true;
     osSemaphoreRelease(camera->sem_init);
     while (camera->is_init) {

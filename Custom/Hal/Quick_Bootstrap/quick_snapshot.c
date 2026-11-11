@@ -621,15 +621,6 @@ static void qs_snapshot_thread(void *argument)
         if (ir_on) {
             qs_light_set(AICAM_TRUE, ir_bri);
         }
-        /* Give the IR-CUT filter time to complete its mechanical travel
-         * when the mode evaluation differs from the restored position.
-         * With the dn_last_eff NVS persistence, the cameraProcess restore
-         * usually leaves the filter already in the correct position (zero
-         * travel). This delay only fires on an actual transition (e.g.
-         * AUTO evaluates NIGHT for the first time after a DAY period). */
-        if (ir_on && eff_mode == 2U /* NIGHT */) {
-            osDelay(150);
-        }
     }
     else if (s_cfg.light_mode != QS_LIGHT_MODE_OFF) {
         aicam_bool_t light_on = AICAM_FALSE;

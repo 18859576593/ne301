@@ -1568,14 +1568,6 @@ uint32_t device_service_day_night_capture_prepare(const day_night_config_t *fast
     if (on) *on = night;
     if (brightness) *brightness = bri;
 
-    /* Persist the effective mode so the next wake's IR-CUT restore
-     * (cameraProcess) can skip the DAY homing when the position hasn't
-     * changed — zero mechanical filter movements per wake. */
-    {
-        uint8_t eff_byte = (uint8_t)eff;
-        (void)storage_nvs_write(NVS_USER, "dn_last_eff", &eff_byte, 1);
-    }
-
     LOG_SVC_INFO("[DN] capture_prepare: isp_mode=%u source=%u eff_mode=%u ir_on=%u ir_bri=%u dn_init=%u",
                  (unsigned)log_isp_mode, (unsigned)log_source, (unsigned)eff,
                  night ? 1u : 0u, (unsigned)bri,
