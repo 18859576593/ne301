@@ -620,6 +620,13 @@ static void qs_snapshot_thread(void *argument)
         eff_mode = device_service_day_night_capture_prepare(&dn_cfg, s_cfg.isp_mode, &ir_on, &ir_bri);
         if (ir_on) {
             qs_light_set(AICAM_TRUE, ir_bri);
+            /* The IR-CUT filter boots through a DAY homing edge (required:
+             * edge-driven, position unknown after power-up) and then
+             * capture_prepare switches it to NIGHT for this capture —
+             * the mechanical travel takes 50-100ms. Wait for the filter
+             * to settle and the IR light to illuminate the scene before
+             * the camera opens, otherwise the first frames are black. */
+            osDelay(150);
         }
     }
     else if (s_cfg.light_mode != QS_LIGHT_MODE_OFF) {
