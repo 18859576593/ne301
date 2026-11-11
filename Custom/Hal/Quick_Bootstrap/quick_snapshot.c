@@ -18,6 +18,8 @@
                                             variant of isp_ae_algo.c
                                             AE_FINE_TOLERANCE (5 normal / 8-10 low) */
 #define QS_VERIFY_CLAMP_DL          2U  /* clamped-accept: |dL| between samples */
+#define QS_VERIFY_CLAMP_DG          500U /* clamped-accept: |dG| between frames (mdb) */
+#define QS_VERIFY_CLAMP_G_STABLE    3U  /* clamped-accept: G stable for this many frames */
 #define QS_SENSOR_DELAY             3U   /* must match profile sensorDelay */
 /* ---- seed policy ----
  * 0 = fixed factory seed, never learned/updated;
@@ -425,6 +427,8 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
     int32_t d_prev = 0x7FFFFFFF;
     uint32_t stall = 0;
     uint32_t extended_from = 0;
+    uint32_t g_prev = 0;
+    uint8_t g_stable = 0;   /* consecutive frames with |dG| <= QS_VERIFY_CLAMP_DG */
     /* ring of last E/G writes indexed by stats frame id, for attribution */
     struct { uint32_t fid; uint32_t e, g; } ring[8] = {0};
 
@@ -499,16 +503,27 @@ static int qs_wait_ae_verified(uint32_t budget_ms,
             if (out_ext) *out_ext = extended_from;
             return 1;
         }
-        /* clamped-accept: BOTH exposure and gain at their ceilings and luma
-         * settled -> this is the best the scene allows.
-         * Gain ceiling = the SENSOR DRIVER's true max (os04c10_reg.h:
-         * OS04C10_GAIN_MAX = 72000mdb), NOT the app-layer GAIN_MAX(15872) —
-         * using the app constant cut the AE climb short at G~20000 in
-         * dark scenes (field log 11-09: stuck at G=20261, L=3, while the
-         * sensor could reach G=72000). */
+        /* clamped-accept: exposure at its ceiling, gain STABLE for N frames,
+         * and luma settled -> the AE has converged to the best the scene
+         * allows, even if L is below the target band. Using gain STABILITY
+         * (|dG| <= 500mdb for 3 consecutive frames) instead of a fixed gain
+         * threshold: field data (11-10 overnight) showed the AE middleware
+         * converges to G=32404 in dark scenes — well below the sensor's
+         * 72000 ceiling — and a threshold of 68000 never fired, leaving the
+         * seed dead-loop. Stability detection is sensor- and scene-agnostic. */
         dl = (uint8_t)(L_prev > L ? (L_prev - L) : (L - L_prev));
+        {
+            uint32_t dg = (uint32_t)(g > g_prev ? (g - g_prev) : (g_prev - g));
+            if (dg <= QS_VERIFY_CLAMP_DG) {
+                if (g_stable < 255) g_stable++;
+            } else {
+                g_stable = 0;
+            }
+            g_prev = g;
+        }
         if (have_prev &&
-            e >= EXPOSURE_MAX && g >= 68000U &&
+            e >= EXPOSURE_MAX &&
+            g_stable >= QS_VERIFY_CLAMP_G_STABLE &&
             dl <= QS_VERIFY_CLAMP_DL) {
             QT_TRACE("[QS] ", "verify exit=2 clamp L=%u e=%lu g=%lu +%lums",
                      (unsigned)L, (unsigned long)e, (unsigned long)g,
@@ -620,13 +635,6 @@ static void qs_snapshot_thread(void *argument)
         eff_mode = device_service_day_night_capture_prepare(&dn_cfg, s_cfg.isp_mode, &ir_on, &ir_bri);
         if (ir_on) {
             qs_light_set(AICAM_TRUE, ir_bri);
-            /* The IR-CUT filter boots through a DAY homing edge (required:
-             * edge-driven, position unknown after power-up) and then
-             * capture_prepare switches it to NIGHT for this capture —
-             * the mechanical travel takes 50-100ms. Wait for the filter
-             * to settle and the IR light to illuminate the scene before
-             * the camera opens, otherwise the first frames are black. */
-            osDelay(150);
         }
     }
     else if (s_cfg.light_mode != QS_LIGHT_MODE_OFF) {
