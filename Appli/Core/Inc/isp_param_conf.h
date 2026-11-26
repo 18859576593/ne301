@@ -259,10 +259,10 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_IMX335 = {
 /* DCMIPP ISP configuration for OS04C10 sensor (outdoor) */
 static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
     .sensorGainStatic = {
-        .gain = 1,
+        .gain = 0,
     },
     .sensorExposureStatic = {
-        .exposure = 20000,
+        .exposure = 19017,
     },
     .AECAlgo = {
         .enable = 1,
@@ -326,21 +326,21 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_OS04C10 = {
     },
     .contrast = {
         .enable = 1,
-        .coeff.LUM_0 = 45,
-        .coeff.LUM_32 = 56,
-        .coeff.LUM_64 = 65,
-        .coeff.LUM_96 = 84,
-        .coeff.LUM_128 = 110,
-        .coeff.LUM_160 = 129,
-        .coeff.LUM_192 = 165,
-        .coeff.LUM_224 = 211,
-        .coeff.LUM_256 = 282,
+        .coeff.LUM_0 = 42,
+        .coeff.LUM_32 = 62,
+        .coeff.LUM_64 = 110,
+        .coeff.LUM_96 = 130,
+        .coeff.LUM_128 = 147,
+        .coeff.LUM_160 = 169,
+        .coeff.LUM_192 = 199,
+        .coeff.LUM_224 = 212,
+        .coeff.LUM_256 = 254,
     },
     .statAreaStatic = {
-        .X0 = 54,
-        .Y0 = 358,
-        .XSize = 2595,
-        .YSize = 869,
+        .X0 = 21,
+        .Y0 = 612,
+        .XSize = 2592,
+        .YSize = 760,
     },
     .gamma = {
         .enable = 1,
